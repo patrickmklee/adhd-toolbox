@@ -1,0 +1,7 @@
+{
+  "name": "agent-toolbox",
+  "owner": { "name": "patrickmklee" },
+  "plugins": [
+    { "name": "adhd-kit", "source": "./plugins/adhd-kit", "description": "My personal skills, hooks and agents" }
+  ]
+}
