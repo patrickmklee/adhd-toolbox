@@ -159,6 +159,21 @@ test("h) heavy pick-up turn ending in the one-line Resumed reply: silent allow",
   assert.equal(r.stdout.trim(), "");
 });
 
+test("h4) heavy pick-up turn ending in Resumed plus checked-claim lines: silent allow", () => {
+  const r = run(transcript({ tools: 25, finalText: "Resumed Repo reorg from C:\\Users\\patri\\.claude\\handoffs\\C--x\\repo-reorg.md; Next: you review the PR.\nconfirmed by `claude plugin validate`\ncontradicted by `--help`: Next needs `claude plugin update`" }));
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), "");
+});
+
+test("h5) pick-up reply split by a tool call: nudged, so the skill's one-final-block rule is load-bearing", () => {
+  const lines = transcript({ tools: 25, finalText: "Resumed Repo reorg from C:\\Users\\patri\\.claude\\handoffs\\C--x\\repo-reorg.md; Next: you review the PR." })
+    + entry("assistant", [{ type: "tool_use", id: "late", name: "Bash", input: { command: "claude --help" } }]) + "\n"
+    + entry("user", [{ type: "tool_result", tool_use_id: "late", content: "ok" }]) + "\n"
+    + entry("assistant", [{ type: "text", text: "contradicted by `--help`: Next needs `claude plugin update`" }]) + "\n";
+  const r = run(lines);
+  assert.equal(JSON.parse(r.stdout).decision, "block");
+});
+
 test("h3) heavy pick-up turn that did real work and ended with plain text: nudged like any other", () => {
   const r = run(transcript({ tools: 25, finalText: "Both probes are running now. I will pass on their results." }));
   assert.equal(JSON.parse(r.stdout).decision, "block");
