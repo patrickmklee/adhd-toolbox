@@ -10,7 +10,12 @@ claude plugin marketplace add patrickmklee/adhd-toolbox
 claude plugin install adhd-kit@agent-toolbox
 ```
 
-Pull a new release with `claude plugin marketplace update agent-toolbox`.
+Pull a new release, then restart Claude Code:
+
+```bash
+claude plugin marketplace update agent-toolbox
+claude plugin update adhd-kit@agent-toolbox
+```
 
 ## Plugins
 

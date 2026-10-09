@@ -12,7 +12,7 @@ A **handoff** is a `## Handoff: <topic>` section of at most 200 words that close
 One handoff per turn, as the final section, when any of these holds:
 
 - the hook asked for one;
-- the operator invoked this skill without naming a handoff, or is stepping away: write it for the state right now, then stop;
+- the operator invoked this skill outside a pick-up turn, or is stepping away: write it for the state right now, then stop;
 - the turn leaves the operator holding the next action: a question to answer, a PR to merge, something to publish.
 
 Every other turn ends plainly: an answer, a commit, a push, a paste acknowledged. A thread that got a handoff last turn earns another only when one of the cases above comes round again. Background agents still running mean the turn is still open: the handoff waits for their results.
@@ -51,7 +51,7 @@ Bullet form, exactly as above. The handoff is the summary: the message above it 
 
 ## Picking up
 
-A **pick-up turn** is one whose prompt names a handoff file or asks to pick up where a session left off. It starts by listing `~/.claude/handoffs/<project-slug>/` (slug = the session's starting cwd with `:` `\` `/` replaced by `-`). Each `.md` is one topic; its first line holds the saved time and the saving session's id. `.prev.md` files are history and stay out of the listing.
+A **pick-up turn** is one whose prompt names a handoff file, asks to pick up where a session left off, or asks for an audit. It starts by listing `~/.claude/handoffs/<project-slug>/` (slug = the session's starting cwd with `:` `\` `/` replaced by `-`). Each `.md` is one topic; its first line holds the saved time and the saving session's id. `.prev.md` files are history and stay out of the listing.
 
 - A named topic matches a file → open it.
 - No topic named and one file → open it.
