@@ -1,6 +1,7 @@
 {
   "name": "agent-toolbox",
   "owner": { "name": "patrickmklee" },
+  "description": "Personal marketplace for my agent plugins, hooks, and skills",
   "plugins": [
     { "name": "adhd-kit", "source": "./plugins/adhd-kit", "description": "My personal skills, hooks and agents" }
   ]
