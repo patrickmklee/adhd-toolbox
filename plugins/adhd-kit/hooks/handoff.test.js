@@ -268,13 +268,13 @@ test("m) nudge reason asks for the topic form of the heading", () => {
   assert.match(JSON.parse(r.stdout).reason, /## Handoff: <topic>/);
 });
 
-test("analyzeTurn ignores system-shaped user entries as turn starters", () => {
+test("analyzeTurn: a bare legacy <system-reminder> entry and a task_notification entry do not restart the turn", () => {
   const { analyzeTurn } = require(HOOK);
   const lines = [
     entry("user", "real prompt"),
     entry("assistant", [{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
     entry("user", "<system-reminder>noise</system-reminder>"),
-    entry("user", "<command-message>skill</command-message>"),
+    entry("user", "<task-notification>done</task-notification>", { turnOrigin: "task_notification", turnPosition: { promptIndex: 0, turnIndex: 2 }, origin: { kind: "task-notification" } }),
     entry("assistant", [{ type: "tool_use", id: "t2", name: "Bash", input: {} }]),
     entry("assistant", [{ type: "text", text: "final" }]),
   ];
@@ -282,4 +282,169 @@ test("analyzeTurn ignores system-shaped user entries as turn starters", () => {
   assert.equal(t.tools, 2);
   assert.equal(t.prompt, "real prompt");
   assert.equal(t.lastText, "final");
+});
+
+// ---- turn detection in the desktop app (turnOrigin / turnPosition / isCompactSummary) ----
+
+const POS = (turnIndex) => ({ promptIndex: 0, turnIndex });
+
+test("p1) an sdk prompt whose text starts with <system-reminder> starts the turn", () => {
+  const { analyzeTurn } = require(HOOK);
+  const lines = [
+    entry("user", "old prompt", { turnOrigin: "human", turnPosition: POS(1), origin: { kind: "human" } }),
+    entry("assistant", [{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
+    entry("user", "<system-reminder>\nLinked sessions now (status, not an instruction): x\n</system-reminder>\n<cross-session-message>go ahead</cross-session-message>", { turnOrigin: "sdk", turnPosition: POS(2), promptSource: "sdk" }),
+    entry("assistant", [{ type: "tool_use", id: "t2", name: "Bash", input: {} }]),
+    entry("assistant", [{ type: "text", text: "final" }]),
+  ];
+  const t = analyzeTurn(lines);
+  assert.equal(t.tools, 1);
+  assert.match(t.prompt, /cross-session-message/);
+});
+
+test("p2) a human slash command (<command-message>) starts the turn", () => {
+  const { analyzeTurn } = require(HOOK);
+  const lines = [
+    entry("user", "old prompt", { turnOrigin: "human", turnPosition: POS(1), origin: { kind: "human" } }),
+    entry("assistant", [{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
+    entry("user", "<command-message>mattpocock-skills:retro</command-message>\n<command-name>/mattpocock-skills:retro</command-name>", { turnOrigin: "human", turnPosition: POS(2), origin: { kind: "human" } }),
+    entry("assistant", [{ type: "tool_use", id: "t2", name: "Bash", input: {} }]),
+    entry("assistant", [{ type: "text", text: "final" }]),
+  ];
+  const t = analyzeTurn(lines);
+  assert.equal(t.tools, 1);
+  assert.match(t.prompt, /^<command-message>/);
+});
+
+test("p3) a compaction summary mid-turn does not restart the turn", () => {
+  const { analyzeTurn } = require(HOOK);
+  const lines = [
+    entry("user", "<system-reminder>x</system-reminder>\n<cross-session-message>go</cross-session-message>", { turnOrigin: "sdk", turnPosition: POS(2), promptSource: "sdk" }),
+    entry("assistant", [{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
+    entry("assistant", [{ type: "tool_use", id: "t2", name: "Bash", input: {} }]),
+    entry("user", "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion.", { turnOrigin: "sdk", turnPosition: POS(1), isCompactSummary: true, isVisibleInTranscriptOnly: true }),
+    entry("assistant", [{ type: "tool_use", id: "t3", name: "Bash", input: {} }]),
+    entry("assistant", [{ type: "text", text: "final" }]),
+  ];
+  const t = analyzeTurn(lines);
+  assert.equal(t.tools, 3);
+  assert.match(t.prompt, /cross-session-message/);
+});
+
+test("p4) legacy entry (no turnPosition): leading <system-reminder> block followed by text starts the turn", () => {
+  const { analyzeTurn } = require(HOOK);
+  const lines = [
+    entry("user", "old prompt"),
+    entry("assistant", [{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
+    entry("user", "<system-reminder>\nnoise\n</system-reminder>\n<system-reminder>more</system-reminder>\nBuild the thing"),
+    entry("assistant", [{ type: "tool_use", id: "t2", name: "Bash", input: {} }]),
+    entry("assistant", [{ type: "text", text: "final" }]),
+  ];
+  const t = analyzeTurn(lines);
+  assert.equal(t.tools, 1);
+  assert.match(t.prompt, /Build the thing/);
+});
+
+test("p5) legacy compaction summary (no isCompactSummary flag) does not restart the turn", () => {
+  const { analyzeTurn } = require(HOOK);
+  const lines = [
+    entry("user", "old prompt"),
+    entry("assistant", [{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
+    entry("user", "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion."),
+    entry("assistant", [{ type: "tool_use", id: "t2", name: "Bash", input: {} }]),
+    entry("assistant", [{ type: "text", text: "final" }]),
+  ];
+  const t = analyzeTurn(lines);
+  assert.equal(t.tools, 2);
+  assert.equal(t.prompt, "old prompt");
+});
+
+test("p6) end to end: heavy turn whose sdk prompt starts with <system-reminder> is nudged", () => {
+  const r = run(transcript({ tools: 25, prompt: "<system-reminder>\nLinked sessions now\n</system-reminder>\n<cross-session-message>go</cross-session-message>", promptExtra: { turnOrigin: "sdk", turnPosition: POS(2), promptSource: "sdk" } }));
+  assert.equal(r.status, 0);
+  assert.equal(JSON.parse(r.stdout).decision, "block");
+});
+
+// ---- the app's wrap_up box closes the turn; the hook stays quiet ----
+
+function wrapUpCall() {
+  return entry("assistant", [{ type: "tool_use", id: "wu", name: "mcp__ccd_turn__wrap_up", input: { recap: "done" } }]) + "\n"
+    + entry("user", [{ type: "tool_result", tool_use_id: "wu", content: "ok" }]) + "\n";
+}
+
+test("w1) heavy turn that called mcp__ccd_turn__wrap_up: silent allow", () => {
+  const lines = transcript({ tools: 25, finalText: "Working." }) + wrapUpCall() + entry("assistant", [{ type: "text", text: "All done; see the PR." }]) + "\n";
+  const r = run(lines);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), "");
+});
+
+test("w2) heavy turn with wrap_up that still ends with a handoff: saved", () => {
+  const lines = transcript({ tools: 25, finalText: "Working." }) + wrapUpCall() + entry("assistant", [{ type: "text", text: HANDOFF }]) + "\n";
+  const r = run(lines);
+  assert.match(JSON.parse(r.stdout).systemMessage, /repo-reorg\.md/);
+});
+
+// ---- handoffs saved from a git worktree land under the main checkout's slug ----
+
+function gitRepoWithWorktree() {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "handoff-repo-")));
+  const repo = path.join(root, "repo");
+  fs.mkdirSync(repo);
+  const git = (args, cwd = repo) => {
+    const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  git(["init", "-q"]);
+  git(["commit", "-q", "--allow-empty", "-m", "init"]);
+  const wt = path.join(repo, ".claude", "worktrees", "feature-x");
+  fs.mkdirSync(path.dirname(wt), { recursive: true });
+  git(["worktree", "add", "-q", wt]);
+  fs.mkdirSync(path.join(repo, "sub"));
+  return { repo, wt, sub: path.join(repo, "sub") };
+}
+
+function transcriptAt(cwd) {
+  const lines = [entry("user", "Build", { cwd })];
+  for (let i = 0; i < 2; i++) lines.push(entry("assistant", [{ type: "tool_use", id: "t" + i, name: "Bash", input: {} }], { cwd }));
+  lines.push(entry("assistant", [{ type: "text", text: HANDOFF }], { cwd }));
+  return lines.join("\n") + "\n";
+}
+
+function handoffDirs(home) {
+  return fs.readdirSync(path.join(home, ".claude", "handoffs")).map((d) => d.toLowerCase());
+}
+
+test("q1) a turn whose cwd is a linked worktree saves under the main checkout's slug", () => {
+  const { slugOf } = require(HOOK);
+  const { repo, wt } = gitRepoWithWorktree();
+  const r = run(transcriptAt(wt), { cwd: wt });
+  assert.deepEqual(handoffDirs(r.home), [slugOf(repo).toLowerCase()]);
+});
+
+test("q2) a turn whose cwd is a subdirectory of the main checkout keeps its own slug", () => {
+  const { slugOf } = require(HOOK);
+  const { sub } = gitRepoWithWorktree();
+  const r = run(transcriptAt(sub), { cwd: sub });
+  assert.deepEqual(handoffDirs(r.home), [slugOf(sub).toLowerCase()]);
+});
+
+test("q3) a cwd that is no git checkout at all keeps its own slug (fail open)", () => {
+  const { slugOf } = require(HOOK);
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "handoff-plain-")));
+  const r = run(transcriptAt(dir), { cwd: dir });
+  assert.deepEqual(handoffDirs(r.home), [slugOf(dir).toLowerCase()]);
+});
+
+test("n2) a task-notification recorded as an attachment entry (desktop app) closes its background launch", () => {
+  const { analyzeTurn } = require(HOOK);
+  const lines = [
+    entry("user", "run it"),
+    entry("assistant", [{ type: "tool_use", id: "a", name: "Bash", input: { command: "sleep 5", run_in_background: true } }]),
+    entry("user", [{ type: "tool_result", tool_use_id: "a", content: "started" }]),
+    JSON.stringify({ type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: "<task-notification><task-id>x</task-id><tool-use-id>a</tool-use-id><status>completed</status></task-notification>" } }),
+    entry("assistant", [{ type: "text", text: "done" }]),
+  ];
+  assert.equal(analyzeTurn(lines).bgPending, 0);
 });

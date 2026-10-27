@@ -1,6 +1,6 @@
 ---
 name: what-were-we-doing-again
-description: Write, pick up, or audit a handoff. Write one when the Stop hook asks, when the operator is stepping away, or when a turn leaves the operator holding the next action. Pick up when a prompt names a handoff file or says resume or pick up. Audit when asked to check the last session's decisions.
+description: Write, pick up, or audit a handoff. Write one when the Stop hook asks or when the operator is stepping away. Pick up when a prompt names a handoff file or says resume or pick up. Audit when asked to check the last session's decisions.
 ---
 
 # Handoff
@@ -12,10 +12,11 @@ A **handoff** is a `## Handoff: <topic>` section of at most 200 words that close
 One handoff per turn, as the final section, when any of these holds:
 
 - the hook asked for one;
-- the operator invoked this skill outside a pick-up turn, or is stepping away: write it for the state right now, then stop;
-- the turn leaves the operator holding the next action: a question to answer, a PR to merge, something to publish.
+- the operator invoked this skill outside a pick-up turn, or is stepping away: write it for the state right now, then stop.
 
 Every other turn ends plainly: an answer, a commit, a push, a paste acknowledged. A thread that got a handoff last turn earns another only when one of the cases above comes round again. Background agents still running mean the turn is still open: the handoff waits for their results.
+
+A turn that called the desktop app's `mcp__ccd_turn__wrap_up` tool is closed by its next-step box: the box carries the recap and the question the operator holds, and a side session's report reaches its parent through it. The hook does not ask after such a turn, and a handoff written after the box could only repeat it or displace the report.
 
 ## Template
 
@@ -51,7 +52,7 @@ Bullet form, exactly as above. The handoff is the summary: the message above it 
 
 ## Picking up
 
-A **pick-up turn** is one whose prompt names a handoff file, says resume or pick up, or asks for an audit. It starts by listing `~/.claude/handoffs/<project-slug>/` (slug = the session's starting cwd with `:` `\` `/` replaced by `-`). Each `.md` is one topic; its first line holds the saved time and the saving session's id. `.prev.md` files are history and stay out of the listing.
+A **pick-up turn** is one whose prompt names a handoff file, says resume or pick up, or asks for an audit. It starts by listing `~/.claude/handoffs/<project-slug>/` (slug = the session's starting cwd with `:` `\` `/` replaced by `-`; when that cwd is a linked git worktree, the hook keys the slug on the main checkout instead, the parent of `git rev-parse --git-common-dir`, so a pick-up from the main checkout sees handoffs saved from worktrees that are gone). Each `.md` is one topic; its first line holds the saved time and the saving session's id. `.prev.md` files are history and stay out of the listing.
 
 - A named topic matches a file → open it.
 - No topic named and one file → open it.
