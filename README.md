@@ -19,6 +19,6 @@ claude plugin update adhd-kit@agent-toolbox
 
 ## Plugins
 
-- **adhd-kit**: `/adhd-kit:what-were-we-doing-again` writes, picks up, or audits a session handoff. Its Stop hook saves handoffs to `~/.claude/handoffs/`.
+- **adhd-kit**: `/adhd-kit:what-were-we-doing-again` writes, picks up, or audits a session handoff. Its Stop hook saves handoffs to `~/.claude/handoffs/`. `/adhd-kit:caveman` switches replies to a terse, low-token style for the rest of the session (say "stop caveman" to turn it off).
 
 
