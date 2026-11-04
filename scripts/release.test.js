@@ -39,3 +39,55 @@ test("latestTag picks highest version for this plugin only", () => {
   assert.deepEqual(R.latestTag(tags, "adhd-kit"), { tag: "adhd-kit--v0.10.0", version: "0.10.0" });
   assert.equal(R.latestTag([], "adhd-kit"), null);
 });
+
+// ---------- Task 2: args, notes, PR content ----------
+
+test("parseArgs accepts the documented forms", () => {
+  assert.deepEqual(R.parseArgs(["minor"]), { command: "bump", kind: "minor", dryRun: false });
+  assert.deepEqual(R.parseArgs(["1.2.3", "--plugin=adhd-kit", "-m", "caveman", "--dry-run"]),
+    { command: "bump", kind: "1.2.3", plugin: "adhd-kit", summary: "caveman", dryRun: true });
+  assert.deepEqual(R.parseArgs(["patch", "--plugin", "adhd-kit", "--message=fix it"]),
+    { command: "bump", kind: "patch", plugin: "adhd-kit", summary: "fix it", dryRun: false });
+  assert.deepEqual(R.parseArgs(["publish", "--dry-run"]), { command: "publish", dryRun: true });
+});
+
+test("parseArgs rejects bad input, including flag-looking plugin names", () => {
+  const bads = [[], ["mega"], ["minor", "--plugin", "--force"], ["minor", "--plugin=-x"],
+    ["minor", "--plugin", "Bad_Name"], ["minor", "--plugin"], ["minor", "--nope"], ["minor", "patch"],
+    ["minor", "-m"], ["minor", "-m", "--dry-run"], ["v1.2.3"]];
+  for (const bad of bads) assert.throws(() => R.parseArgs(bad), ReleaseError, JSON.stringify(bad));
+});
+
+test("parseLog and formatNotes", () => {
+  const commits = R.parseLog("a0e0f69 Add caveman skill\n6c45426 adhd-kit 0.3.0: release caveman skill\n\n");
+  assert.deepEqual(commits, [
+    { sha: "a0e0f69", subject: "Add caveman skill" },
+    { sha: "6c45426", subject: "adhd-kit 0.3.0: release caveman skill" },
+  ]);
+  assert.equal(R.formatNotes(commits, "adhd-kit"), "- a0e0f69 Add caveman skill");
+  assert.equal(R.formatNotes([], "adhd-kit"), "No changes under plugins/adhd-kit/.");
+});
+
+test("isBumpCommit", () => {
+  assert.ok(R.isBumpCommit("adhd-kit 0.4.0", "adhd-kit"));
+  assert.ok(R.isBumpCommit("adhd-kit 0.4.0: caveman", "adhd-kit", "0.4.0"));
+  assert.ok(!R.isBumpCommit("adhd-kit 0.4.0", "adhd-kit", "0.5.0"));
+  assert.ok(!R.isBumpCommit("adhd-kit-extra 1.0.0", "adhd-kit"));
+  assert.ok(!R.isBumpCommit("adhd-kit 0.4.0 tweaks", "adhd-kit"));
+});
+
+test("bumpedPlugins overlays the dry-run target", () => {
+  const main = { "adhd-kit": "0.3.0", other: "1.0.0" };
+  assert.deepEqual(R.bumpedPlugins(main, { ...main }, { plugin: "adhd-kit", version: "0.4.0" }),
+    [{ plugin: "adhd-kit", version: "0.4.0" }]);
+  assert.deepEqual(R.bumpedPlugins(main, { "adhd-kit": "0.4.0", other: "1.1.0", fresh: "0.1.0" }).map((b) => b.plugin),
+    ["adhd-kit", "fresh", "other"]);
+});
+
+test("prTitle and prBody", () => {
+  assert.equal(R.prTitle([{ plugin: "adhd-kit", version: "0.4.0" }, { plugin: "other", version: "1.2.0" }]),
+    "adhd-kit 0.4.0, other 1.2.0");
+  assert.equal(R.prBody([{ plugin: "adhd-kit", version: "0.4.0", notes: "- a1 x" }]), "## adhd-kit 0.4.0\n\n- a1 x");
+  assert.equal(R.prBody([{ plugin: "a", version: "1.0.0", notes: "n1" }, { plugin: "b", version: "2.0.0", notes: "n2" }]),
+    "## a 1.0.0\n\nn1\n\n## b 2.0.0\n\nn2");
+});
