@@ -5,14 +5,19 @@
 //   node scripts/release.js <patch|minor|major|X.Y.Z> [--plugin <name>] [-m "<summary>"] [--dry-run]
 //   node scripts/release.js publish [--dry-run]
 
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+
 // ---------- errors ----------
 
 class ReleaseError extends Error {
-  constructor(message, { next } = {}) {
+  constructor(message, { next, step } = {}) {
     super(message);
     this.name = "ReleaseError";
     this.exitCode = 1;
     this.next = next;
+    this.step = step;
   }
 }
 
@@ -191,22 +196,22 @@ function planBump(state) {
 
   // Guards (spec bump step 1).
   if (state.branch !== "develop") {
-    throw new ReleaseError(`must be on develop (currently on ${state.branch})`, { next: "git switch develop" });
+    throw new ReleaseError(`must be on develop (currently on ${state.branch})`, { next: "git switch develop", step: "guards" });
   }
   if (!state.clean) {
-    throw new ReleaseError("working tree is not clean", { next: "commit or stash your changes, then rerun" });
+    throw new ReleaseError("working tree is not clean", { next: "commit or stash your changes, then rerun", step: "guards" });
   }
   if (state.behind > 0) {
-    throw new ReleaseError(`develop is ${state.behind} commit(s) behind origin/develop`, { next: "git pull --ff-only origin develop" });
+    throw new ReleaseError(`develop is ${state.behind} commit(s) behind origin/develop`, { next: "git pull --ff-only origin develop", step: "guards" });
   }
   if (state.ahead > 1) {
-    throw new ReleaseError(`develop is ${state.ahead} commits ahead of origin/develop; push or drop them first`, { next: "git push origin develop" });
+    throw new ReleaseError(`develop is ${state.ahead} commits ahead of origin/develop; push or drop them first`, { next: "git push origin develop", step: "guards" });
   }
   if (state.marketplaceHasVersion) {
-    throw new ReleaseError(`.claude-plugin/marketplace.json sets a version for ${plugin}; remove it (plugin.json is the only version source)`);
+    throw new ReleaseError(`.claude-plugin/marketplace.json sets a version for ${plugin}; remove it (plugin.json is the only version source)`, { step: "guards" });
   }
   if (!state.hasGitleaks) {
-    if (!dryRun) throw new ReleaseError("gitleaks not found on PATH", { next: GITLEAKS_HINT });
+    if (!dryRun) throw new ReleaseError("gitleaks not found on PATH", { next: GITLEAKS_HINT, step: "guards" });
     warnings.push(`gitleaks not found on PATH; a real run will refuse (${GITLEAKS_HINT})`);
   }
 
@@ -214,14 +219,14 @@ function planBump(state) {
   const target = bumpVersion(state.mainVersion, kind);
   const tag = tagName(plugin, target);
   if (compareVersions(target, state.mainVersion) <= 0) {
-    throw new ReleaseError(`target ${target} is not above the released version ${state.mainVersion} on main`);
+    throw new ReleaseError(`target ${target} is not above the released version ${state.mainVersion} on main`, { step: "target" });
   }
   const last = latestTag(state.tags, plugin);
   if (last && compareVersions(target, last.version) <= 0) {
-    throw new ReleaseError(`target ${target} is not above the latest tag ${last.tag}`);
+    throw new ReleaseError(`target ${target} is not above the latest tag ${last.tag}`, { step: "target" });
   }
   if (state.tags.includes(tag)) {
-    throw new ReleaseError(`tag ${tag} already exists`);
+    throw new ReleaseError(`tag ${tag} already exists`, { step: "target" });
   }
 
   const commitMessage = summary ? `${plugin} ${target}: ${summary}` : `${plugin} ${target}`;
@@ -273,9 +278,243 @@ function planPublish({ plugin, version, tags, view, hasGitleaks, dryRun }) {
   return { action: "create", tag, since: since ? since.tag : null, warnings };
 }
 
+// ---------- command layer (impure) ----------
+
+let ROOT = null;
+let currentStep = "args";
+
+function step(name) {
+  currentStep = name;
+}
+
+function display(cmd, args) {
+  return [cmd, ...args].map((a) => (/[\s"]/.test(a) ? JSON.stringify(a) : a)).join(" ");
+}
+
+function exec(cmd, args, input) {
+  return spawnSync(cmd, args, {
+    cwd: ROOT || undefined,
+    input,
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function run(cmd, args, { input, mutating = false, dryRun = false } = {}) {
+  if (mutating && dryRun) {
+    console.log(`[dry-run] ${display(cmd, args)}`);
+    return "";
+  }
+  const r = exec(cmd, args, input);
+  if (r.error) throw new CommandError(`${cmd} could not be started: ${r.error.message}`);
+  if (r.status !== 0) {
+    throw new CommandError(`${cmd} ${args[0]} failed: ${(r.stderr || r.stdout || "").trim() || `exit ${r.status}`}`);
+  }
+  return r.stdout.trim();
+}
+
+function scan(text) {
+  const r = exec("gitleaks", ["stdin", "--no-banner", "--redact"], text);
+  if (r.error && r.error.code === "ENOENT") return "missing";
+  if (r.error) throw new CommandError(`gitleaks could not be started: ${r.error.message}`);
+  if (r.status === 0) return "clean";
+  process.stderr.write(`${r.stdout || ""}${r.stderr || ""}`);
+  return "hit";
+}
+
+function repoRoot() {
+  return run("git", ["rev-parse", "--show-toplevel"]);
+}
+
+function manifestPath(plugin) {
+  return `plugins/${plugin}/.claude-plugin/plugin.json`;
+}
+
+function versionOf(jsonText, where) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw new ReleaseError(`${where} is not valid JSON`);
+  }
+  if (!parsed || !VERSION_RE.test(String(parsed.version))) {
+    throw new ReleaseError(`${where} has no valid X.Y.Z "version"`);
+  }
+  return parsed.version;
+}
+
+function readPluginVersions(ref) {
+  const versions = {};
+  if (ref === "WORKTREE") {
+    const dir = path.join(ROOT, "plugins");
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!d.isDirectory() || !PLUGIN_RE.test(d.name)) continue;
+      const file = path.join(ROOT, manifestPath(d.name));
+      if (!fs.existsSync(file)) continue;
+      versions[d.name] = versionOf(fs.readFileSync(file, "utf8"), manifestPath(d.name));
+    }
+    return versions;
+  }
+  const listing = run("git", ["ls-tree", "--name-only", ref, "--", "plugins/"]);
+  for (const line of listing.split(/\r?\n/)) {
+    const name = line.replace(/^plugins\//, "");
+    if (!PLUGIN_RE.test(name)) continue;
+    const r = exec("git", ["show", `${ref}:${manifestPath(name)}`]);
+    if (r.status !== 0) continue; // folder without a manifest at that ref
+    versions[name] = versionOf(r.stdout, `${ref}:${manifestPath(name)}`);
+  }
+  return versions;
+}
+
+function listTags(pattern) {
+  return run("git", ["tag", "--list", pattern]).split(/\r?\n/).filter(Boolean);
+}
+
+function notesFor(plugin, since, ref) {
+  const range = since ? `${since}..${ref}` : ref;
+  const log = run("git", ["log", "--no-merges", "--format=%h %s", range, "--", `plugins/${plugin}/`]);
+  return formatNotes(parseLog(log), plugin);
+}
+
+function marketplaceHasVersion(plugin) {
+  const file = path.join(ROOT, ".claude-plugin", "marketplace.json");
+  if (!fs.existsSync(file)) return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    throw new ReleaseError(".claude-plugin/marketplace.json is not valid JSON");
+  }
+  const entry = (parsed.plugins || []).find((p) => p && p.name === plugin);
+  return Boolean(entry && Object.prototype.hasOwnProperty.call(entry, "version"));
+}
+
+// ---------- bump command ----------
+
+function bump(opts) {
+  const dryRun = opts.dryRun;
+
+  step("guards");
+  run("gh", ["auth", "status"]);
+  run("git", ["fetch", "origin", "--tags"]);
+
+  const worktreeVersions = readPluginVersions("WORKTREE");
+  const names = Object.keys(worktreeVersions).sort();
+  let plugin = opts.plugin;
+  if (!plugin) {
+    if (names.length !== 1) throw new ReleaseError(`--plugin is required (plugins: ${names.join(", ")})`);
+    plugin = names[0];
+  }
+  if (!names.includes(plugin)) throw new ReleaseError(`no plugin named "${plugin}" (plugins: ${names.join(", ")})`);
+
+  const rel = manifestPath(plugin);
+  const file = path.join(ROOT, rel);
+  const text = fs.readFileSync(file, "utf8");
+  const mainVersions = readPluginVersions("origin/main");
+
+  const state = {
+    plugin,
+    kind: opts.kind,
+    summary: opts.summary,
+    dryRun,
+    branch: run("git", ["rev-parse", "--abbrev-ref", "HEAD"]),
+    clean: run("git", ["status", "--porcelain"]) === "",
+    ahead: Number(run("git", ["rev-list", "--count", "origin/develop..HEAD"])),
+    behind: Number(run("git", ["rev-list", "--count", "HEAD..origin/develop"])),
+    headSubject: run("git", ["log", "-1", "--format=%s"]),
+    mainVersion: mainVersions[plugin] || "0.0.0",
+    developVersion: worktreeVersions[plugin],
+    tags: listTags(`${plugin}--v*`),
+    marketplaceHasVersion: marketplaceHasVersion(plugin),
+    hasGitleaks: scan("") !== "missing",
+  };
+
+  step("target");
+  const plan = planBump(state);
+  for (const w of plan.warnings) console.error(`warning: ${w}`);
+  console.log(`${plugin}: ${state.mainVersion} (main) -> ${plan.target}, tag ${plan.tag} on merge`);
+
+  step("write");
+  if (plan.write) {
+    console.log(`${rel}: ${state.developVersion} -> ${plan.target}${dryRun ? " (dry-run, not written)" : ""}`);
+    if (!dryRun) fs.writeFileSync(file, setVersion(text, plan.target));
+  }
+
+  step("commit");
+  if (plan.commit) {
+    try {
+      run("git", ["commit", "-m", plan.commitMessage, "--", rel], { mutating: true, dryRun });
+    } catch (e) {
+      if (!dryRun) exec("git", ["checkout", "--", rel]);
+      throw e;
+    }
+  }
+
+  step("build");
+  const bumps = bumpedPlugins(mainVersions, readPluginVersions("WORKTREE"), { plugin, version: plan.target });
+  const allTags = listTags("*--v*");
+  const sections = bumps.map((b) => {
+    const last = latestTag(allTags, b.plugin);
+    return { ...b, notes: notesFor(b.plugin, last ? last.tag : null, "HEAD") };
+  });
+  const title = prTitle(bumps);
+  const body = prBody(sections);
+
+  step("scan");
+  const result = scan(`${plan.commitMessage}\n${title}\n${body}`);
+  if (result === "hit") {
+    throw new ReleaseError("secret scan flagged the commit message, PR title or PR body; nothing was pushed", {
+      next: "fix the flagged text. If it is in the -m summary: git reset --hard origin/develop  (drops only the unpushed bump commit), then rerun with a different -m",
+    });
+  }
+  if (result === "missing" && !dryRun) throw new ReleaseError("gitleaks not found on PATH", { next: GITLEAKS_HINT });
+
+  if (dryRun) console.log(`PR title: ${title}\nPR body:\n${body}`);
+
+  step("push");
+  if (plan.push) run("git", ["push", "origin", "develop"], { mutating: true, dryRun });
+
+  step("pr");
+  const open = JSON.parse(
+    run("gh", ["pr", "list", "--base", "main", "--head", "develop", "--state", "open", "--json", "number,url", "--limit", "1"]) || "[]",
+  );
+  let url;
+  if (open.length) {
+    run("gh", ["pr", "edit", String(open[0].number), "--title", title, "--body-file", "-"], { input: body, mutating: true, dryRun });
+    url = open[0].url;
+  } else {
+    url = run("gh", ["pr", "create", "--base", "main", "--head", "develop", "--title", title, "--body-file", "-"], {
+      input: body,
+      mutating: true,
+      dryRun,
+    });
+  }
+  console.log(url ? `PR: ${url}` : "PR: (dry-run, would be created)");
+}
+
+// ---------- publish command ----------
+
+function publish() {
+  throw new ReleaseError("publish is not implemented yet");
+}
+
 // ---------- entry point ----------
 
-async function main(argv) {}
+async function main(argv) {
+  try {
+    step("args");
+    const opts = parseArgs(argv);
+    ROOT = repoRoot();
+    if (opts.command === "publish") publish(opts);
+    else bump(opts);
+  } catch (e) {
+    if (!(e instanceof ReleaseError || e instanceof CommandError)) throw e;
+    console.error(`release: [${e.step || currentStep}] ${e.message}`);
+    if (currentStep !== "args") console.error(`next: ${e.next || `rerun: node scripts/release.js ${argv.join(" ")}`}`);
+    process.exitCode = e.exitCode;
+  }
+}
 
 if (require.main === module) {
   main(process.argv.slice(2));
@@ -301,4 +540,10 @@ module.exports = {
   planBump,
   releaseExists,
   planPublish,
+  run,
+  scan,
+  repoRoot,
+  readPluginVersions,
+  notesFor,
+  main,
 };
