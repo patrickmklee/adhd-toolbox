@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 // Release tooling for this plugin marketplace.
-// Spec: docs/superpowers/specs/2026-11-03-release-script-design.md
 //
 //   node scripts/release.js <patch|minor|major|X.Y.Z> [--plugin <name>] [-m "<summary>"] [--dry-run]
 //   node scripts/release.js publish [--dry-run]

@@ -1,6 +1,5 @@
 # Creates the <plugin>--v<version> tag and GitHub Release for every plugin
 # whose plugin.json version on main has no Release yet. A no-op otherwise.
-# Spec: docs/superpowers/specs/2026-11-03-release-script-design.md
 name: release
 
 on:
