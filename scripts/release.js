@@ -238,7 +238,9 @@ function planBump(state) {
         next: "push or drop that commit, then rerun",
       });
     }
-    return { target, tag, commitMessage, write: false, commit: false, push: true, warnings };
+    // Resume: scan the commit that will actually be pushed, not the one this run would have written.
+    const scanMessage = state.headMessage || state.headSubject;
+    return { target, tag, commitMessage, scanMessage, write: false, commit: false, push: true, warnings };
   }
 
   const cmp = compareVersions(state.developVersion, target);
@@ -246,9 +248,35 @@ function planBump(state) {
     throw new ReleaseError(`develop already has ${plugin} ${state.developVersion}, above ${target}; pass an explicit version`, explicitHint);
   }
   if (cmp === 0) {
-    return { target, tag, commitMessage, write: false, commit: false, push: false, warnings };
+    return { target, tag, commitMessage, scanMessage: commitMessage, write: false, commit: false, push: false, warnings };
   }
-  return { target, tag, commitMessage, write: true, commit: true, push: true, warnings };
+  return { target, tag, commitMessage, scanMessage: commitMessage, write: true, commit: true, push: true, warnings };
+}
+
+// gitleaks runs with --exit-code 1: 1 means leaks found; any other non-zero is a gitleaks failure.
+function scanResult(r) {
+  if (r.error && r.error.code === "ENOENT") return "missing";
+  if (r.error) throw new CommandError(`gitleaks could not be started: ${r.error.message}`);
+  if (r.status === 0) return "clean";
+  if (r.status === 1) return "hit";
+  throw new CommandError(`gitleaks failed (exit ${r.status}): ${(r.stderr || "").trim()}`, {
+    next: "check the gitleaks install (v8.19+ is needed for `gitleaks stdin`): gitleaks version",
+  });
+}
+
+function requireCleanScan(result, dryRun, what) {
+  if (result === "clean") return;
+  if (result === "missing") {
+    if (dryRun) return;
+    throw new ReleaseError(`gitleaks not found on PATH; refusing to continue without scanning the ${what}`, { next: GITLEAKS_HINT });
+  }
+  throw new ReleaseError(`secret scan flagged the ${what}; nothing was pushed or published`);
+}
+
+function assertPublishRef(env) {
+  if (env.GITHUB_ACTIONS === "true" && env.GITHUB_REF !== "refs/heads/main") {
+    throw new ReleaseError(`publish only runs on refs/heads/main in Actions (got ${env.GITHUB_REF})`);
+  }
 }
 
 function releaseExists(view) {
@@ -315,12 +343,10 @@ function run(cmd, args, { input, mutating = false, dryRun = false } = {}) {
 }
 
 function scan(text) {
-  const r = exec("gitleaks", ["stdin", "--no-banner", "--redact"], text);
-  if (r.error && r.error.code === "ENOENT") return "missing";
-  if (r.error) throw new CommandError(`gitleaks could not be started: ${r.error.message}`);
-  if (r.status === 0) return "clean";
-  process.stderr.write(`${r.stdout || ""}${r.stderr || ""}`);
-  return "hit";
+  const r = exec("gitleaks", ["stdin", "--no-banner", "--redact", "--exit-code", "1"], text);
+  const result = scanResult(r);
+  if (result === "hit") process.stderr.write(`${r.stdout || ""}${r.stderr || ""}`);
+  return result;
 }
 
 function repoRoot() {
@@ -423,6 +449,7 @@ function bump(opts) {
     ahead: Number(run("git", ["rev-list", "--count", "origin/develop..HEAD"])),
     behind: Number(run("git", ["rev-list", "--count", "HEAD..origin/develop"])),
     headSubject: run("git", ["log", "-1", "--format=%s"]),
+    headMessage: run("git", ["log", "-1", "--format=%B"]),
     mainVersion: mainVersions[plugin] || "0.0.0",
     developVersion: worktreeVersions[plugin],
     tags: listTags(`${plugin}--v*`),
@@ -462,13 +489,15 @@ function bump(opts) {
   const body = prBody(sections);
 
   step("scan");
-  const result = scan(`${plan.commitMessage}\n${title}\n${body}`);
-  if (result === "hit") {
-    throw new ReleaseError("secret scan flagged the commit message, PR title or PR body; nothing was pushed", {
-      next: "fix the flagged text. If it is in the -m summary: git reset --hard origin/develop  (drops only the unpushed bump commit), then rerun with a different -m",
-    });
+  try {
+    requireCleanScan(scan(`${plan.scanMessage}\n${title}\n${body}`), dryRun, "bump commit message, PR title or PR body");
+  } catch (e) {
+    if (e instanceof ReleaseError && !e.next) {
+      e.next =
+        "fix the flagged text. If it is in the bump commit message: git reset --hard origin/develop  (drops only the unpushed bump commit), then rerun with a different -m";
+    }
+    throw e;
   }
-  if (result === "missing" && !dryRun) throw new ReleaseError("gitleaks not found on PATH", { next: GITLEAKS_HINT });
 
   if (dryRun) console.log(`PR title: ${title}\nPR body:\n${body}`);
 
@@ -499,6 +528,7 @@ function publish(opts) {
   const dryRun = opts.dryRun;
 
   step("guards");
+  assertPublishRef(process.env);
   run("gh", ["auth", "status"]);
   const sha = run("git", ["rev-parse", "HEAD"]);
   const tags = listTags("*--v*");
@@ -524,10 +554,11 @@ function publish(opts) {
     for (const w of p.warnings) console.error(`warning: ${w}`);
 
     const notes = notesFor(plugin, p.since, "HEAD");
-    if (scan(notes) === "hit") {
-      throw new ReleaseError(`secret scan flagged the release notes for ${tag}; nothing was created`, {
-        next: "reword or rewrite the flagged commit subject, then rerun the workflow",
-      });
+    try {
+      requireCleanScan(scan(notes), dryRun, `release notes for ${tag}`);
+    } catch (e) {
+      if (e instanceof ReleaseError && !e.next) e.next = "reword or rewrite the flagged commit subject, then rerun the workflow";
+      throw e;
     }
     if (dryRun) console.log(`notes for ${tag}:\n${notes}`);
 
@@ -581,6 +612,9 @@ module.exports = {
   planBump,
   releaseExists,
   planPublish,
+  scanResult,
+  requireCleanScan,
+  assertPublishRef,
   run,
   scan,
   repoRoot,

@@ -125,7 +125,7 @@ test("planBump refuses unsafe state", () => {
 
 test("planBump fresh run writes, commits and pushes", () => {
   assert.deepEqual(R.planBump(bumpState()), {
-    target: "0.4.0", tag: "adhd-kit--v0.4.0", commitMessage: "adhd-kit 0.4.0",
+    target: "0.4.0", tag: "adhd-kit--v0.4.0", commitMessage: "adhd-kit 0.4.0", scanMessage: "adhd-kit 0.4.0",
     write: true, commit: true, push: true, warnings: [],
   });
   assert.equal(R.planBump(bumpState({ summary: "caveman" })).commitMessage, "adhd-kit 0.4.0: caveman");
@@ -164,4 +164,36 @@ test("planPublish", () => {
   assert.throws(() => R.planPublish({ ...base, version: "0.2.0", view: missing }), /went backwards/);
   assert.throws(() => R.planPublish({ ...base, version: "0.4.0", view: missing, hasGitleaks: false }), ReleaseError);
   assert.equal(R.planPublish({ ...base, version: "0.4.0", view: missing, hasGitleaks: false, dryRun: true }).warnings.length, 1);
+});
+
+// ---------- final review fixes ----------
+
+test("C1: a resumed run scans the HEAD commit message it is about to push, not the rebuilt one", () => {
+  const p = R.planBump(bumpState({
+    ahead: 1, headSubject: "adhd-kit 0.4.0: ghp_secret", headMessage: "adhd-kit 0.4.0: ghp_secret\n", developVersion: "0.4.0",
+  }));
+  assert.equal(p.push, true);
+  assert.match(p.scanMessage, /ghp_secret/);
+  assert.equal(R.planBump(bumpState({ summary: "caveman" })).scanMessage, "adhd-kit 0.4.0: caveman");
+});
+
+test("I2: scanResult separates a hit (exit 1) from a gitleaks failure", () => {
+  assert.equal(R.scanResult({ status: 0 }), "clean");
+  assert.equal(R.scanResult({ status: 1 }), "hit");
+  assert.equal(R.scanResult({ error: { code: "ENOENT" } }), "missing");
+  assert.throws(() => R.scanResult({ status: 126, stderr: "unknown flag" }), CommandError);
+  assert.throws(() => R.scanResult({ error: { code: "EACCES", message: "denied" } }), CommandError);
+});
+
+test("M1->Important: requireCleanScan fails closed except missing under dry-run", () => {
+  assert.doesNotThrow(() => R.requireCleanScan("clean", false, "notes"));
+  assert.throws(() => R.requireCleanScan("hit", true, "notes"), ReleaseError);
+  assert.throws(() => R.requireCleanScan("missing", false, "notes"), ReleaseError);
+  assert.doesNotThrow(() => R.requireCleanScan("missing", true, "notes"));
+});
+
+test("I1: publish refuses to run in Actions on any ref but main", () => {
+  assert.doesNotThrow(() => R.assertPublishRef({ GITHUB_ACTIONS: "true", GITHUB_REF: "refs/heads/main" }));
+  assert.throws(() => R.assertPublishRef({ GITHUB_ACTIONS: "true", GITHUB_REF: "refs/heads/develop" }), ReleaseError);
+  assert.doesNotThrow(() => R.assertPublishRef({}));
 });
