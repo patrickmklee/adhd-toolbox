@@ -9,6 +9,8 @@ This repository is a small plugin toolbox for agent workflows. The top-level pro
   - `hooks/`: Claude/agent stop hooks and their runtime config. The existing `handoff.js` script is the reference implementation.
   - `skills/`: promptable workflow skills, each usually in its own folder with a `SKILL.md` file.
   - `agents/`, `commands/`, `scripts/`: optional plugin components when a plugin needs sub-agents, slash commands, or helper scripts.
+- `scripts/release.js`: marketplace-wide release tooling (bump, commit, PR; `publish` creates tags and Releases). It deliberately lives outside `plugins/` because it spans plugins. The README's "Releasing" section explains how to use it.
+- `.github/workflows/release.yml`: runs `node scripts/release.js publish` on every push to `main`.
 
 ## Working conventions
 
@@ -22,6 +24,8 @@ This repository is a small plugin toolbox for agent workflows. The top-level pro
 
 - Run the relevant Node test directly, for example:
   - `node --test "plugins/adhd-kit/hooks/handoff.test.js"`
+  - `node --test "scripts/release.test.js"`
+- For release tooling changes, also check with `node scripts/release.js <kind> --dry-run` on a `develop` checkout and `node scripts/release.js publish --dry-run` on `main`.
 - If a behavior change affects a plugin hook, add or update a small test next to the implementation before treating it as complete.
 - Prefer minimal, local verification over broad repo-wide scaffolding or framework changes.
 

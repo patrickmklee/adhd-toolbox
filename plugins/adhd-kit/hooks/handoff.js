@@ -15,6 +15,7 @@ const SYSTEM_PREFIX = /^\s*<(command-message|system-reminder|task-notification|l
 const LEADING_REMINDERS = /^(?:\s*<system-reminder>[\s\S]*?<\/system-reminder>)+\s*/;
 const COMPACT_SUMMARY = /^\s*This session is being continued from a previous conversation/;
 const TASK_NOTIFICATION = /^\s*<task-notification/;
+const ASYNC_LAUNCHED = /^\s*Async agent launched/;
 // The pick-up turn's one-line reply ("Resumed <topic> from <path>; Next: …") is a complete turn ending.
 const RESUMED_LINE = /^\s*Resumed\b[^\n]*\bfrom\b/i;
 const SAVED_LINE = /^<!-- saved [^\n]* session ([\w-]+) -->/;
@@ -54,8 +55,18 @@ function findHeading(text) {
   return last;
 }
 
+// The first text of a tool_result: a plain string, or the first text block of an array (desktop app).
+function resultText(b) {
+  const c = b.content;
+  if (typeof c === "string") return c;
+  const t = Array.isArray(c) && c.find((x) => x && x.type === "text");
+  return t ? String(t.text || "") : "";
+}
+
 // Walk the transcript (array of JSONL strings) and describe the last turn.
-// bgPending counts background launches (Agent/Bash with run_in_background) whose task-notification has not arrived.
+// bgPending counts background launches whose task-notification has not arrived: a tool_use with
+// run_in_background, or an Agent/Task call whose result says it launched async (the desktop app runs agents in the
+// background by default and sends no flag). Each launch is counted once, keyed on its tool_use id.
 function analyzeTurn(lines) {
   const turn = { prompt: null, promptTs: null, cwd: null, tools: 0, exitPlan: false, bgPending: 0, wrapUp: false, lastText: "" };
   const entries = [];
@@ -70,6 +81,7 @@ function analyzeTurn(lines) {
   if (start < 0) return turn;
   turn.prompt = promptText(entries[start]);
   turn.promptTs = entries[start].timestamp || null;
+  const agentIds = new Set(); // Agent/Task calls not yet counted as background launches
   for (const o of entries.slice(start + 1)) {
     if (o.isSidechain) continue;
     // The desktop app records a notification that lands mid-turn as an attachment (queued_command), not a user entry.
@@ -79,6 +91,12 @@ function analyzeTurn(lines) {
       continue;
     }
     if (o.type === "user") {
+      const c = o.message && o.message.content;
+      if (Array.isArray(c)) {
+        for (const b of c) {
+          if (b && b.type === "tool_result" && agentIds.delete(b.tool_use_id) && ASYNC_LAUNCHED.test(resultText(b))) turn.bgPending++;
+        }
+      }
       const t = promptText(o);
       if (t !== null && TASK_NOTIFICATION.test(t) && turn.bgPending > 0) turn.bgPending--;
       continue;
@@ -90,6 +108,7 @@ function analyzeTurn(lines) {
         if (b.name === "ExitPlanMode") turn.exitPlan = true;
         if (b.name === "mcp__ccd_turn__wrap_up") turn.wrapUp = true; // the desktop app's next-step box closes the turn
         if (b.input && b.input.run_in_background === true) turn.bgPending++;
+        else if ((b.name === "Agent" || b.name === "Task") && b.id) agentIds.add(b.id);
       } else if (b.type === "text" && b.text && b.text.trim()) turn.lastText = b.text;
     }
   }

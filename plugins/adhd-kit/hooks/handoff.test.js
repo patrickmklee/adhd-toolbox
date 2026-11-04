@@ -448,3 +448,41 @@ test("n2) a task-notification recorded as an attachment entry (desktop app) clos
   ];
   assert.equal(analyzeTurn(lines).bgPending, 0);
 });
+
+test("n3) desktop-app Agent with no run_in_background flag counts as pending once its result says it launched async", () => {
+  const { analyzeTurn } = require(HOOK);
+  const launched = (id) => entry("user", [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text: "Async agent launched successfully. (internal metadata)\nagentId: x" }] }]);
+  const agent = (id) => entry("assistant", [{ type: "tool_use", id, name: "Agent", input: { prompt: "review" } }]);
+  const notified = JSON.stringify({ type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: "<task-notification><status>completed</status></task-notification>" } });
+  const head = [entry("user", "review the branch"), agent("r1"), agent("r2"), launched("r1"), launched("r2")];
+  assert.equal(analyzeTurn([...head, entry("assistant", [{ type: "text", text: "Both reviewers are running." }])]).bgPending, 2);
+  assert.equal(analyzeTurn([...head, notified, notified]).bgPending, 0);
+  // A foreground Agent returns its report, not a launch line; a Bash that prints the phrase is not a launch.
+  const fg = [entry("user", "go"), agent("f"), entry("user", [{ type: "tool_result", tool_use_id: "f", content: [{ type: "text", text: "Report: all good" }] }]),
+    entry("assistant", [{ type: "tool_use", id: "s", name: "Bash", input: { command: "cat log" } }]),
+    entry("user", [{ type: "tool_result", tool_use_id: "s", content: "Async agent launched successfully." }])];
+  assert.equal(analyzeTurn(fg).bgPending, 0);
+});
+
+test("n4) a flagged Agent whose result also says it launched async is counted once", () => {
+  const { analyzeTurn } = require(HOOK);
+  const lines = [
+    entry("user", "probe"),
+    entry("assistant", [{ type: "tool_use", id: "a", name: "Agent", input: { prompt: "x", run_in_background: true } }]),
+    entry("user", [{ type: "tool_result", tool_use_id: "a", content: [{ type: "text", text: "Async agent launched successfully." }] }]),
+  ];
+  assert.equal(analyzeTurn(lines).bgPending, 1);
+});
+
+test("n5) desktop reviewers still running after a heavy turn: no nudge", () => {
+  const lines = [entry("user", "review it")];
+  for (let i = 0; i < 25; i++) lines.push(entry("assistant", [{ type: "tool_use", id: "t" + i, name: "Read", input: {} }]));
+  for (const id of ["r1", "r2"]) {
+    lines.push(entry("assistant", [{ type: "tool_use", id, name: "Agent", input: { prompt: "review" } }]));
+    lines.push(entry("user", [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text: "Async agent launched successfully." }] }]));
+  }
+  lines.push(entry("assistant", [{ type: "text", text: "Both reviewers are running in the background." }]));
+  const r = run(lines.join("\n") + "\n");
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), "");
+});
