@@ -91,3 +91,77 @@ test("prTitle and prBody", () => {
   assert.equal(R.prBody([{ plugin: "a", version: "1.0.0", notes: "n1" }, { plugin: "b", version: "2.0.0", notes: "n2" }]),
     "## a 1.0.0\n\nn1\n\n## b 2.0.0\n\nn2");
 });
+
+// ---------- Task 3: planning ----------
+
+const { CommandError } = R;
+
+function bumpState(overrides = {}) {
+  return {
+    plugin: "adhd-kit", kind: "minor", summary: undefined, dryRun: false,
+    branch: "develop", clean: true, ahead: 0, behind: 0, headSubject: "Merge pull request #3 from patrickmklee/develop",
+    mainVersion: "0.3.0", developVersion: "0.3.0", tags: ["adhd-kit--v0.3.0"],
+    marketplaceHasVersion: false, hasGitleaks: true,
+    ...overrides,
+  };
+}
+
+test("planBump refuses unsafe state", () => {
+  const cases = [
+    [{ branch: "main" }, /develop/],
+    [{ clean: false }, /clean/],
+    [{ behind: 1 }, /git pull/],
+    [{ ahead: 2 }, /ahead/],
+    [{ marketplaceHasVersion: true }, /marketplace\.json/],
+    [{ hasGitleaks: false }, /winget install gitleaks/],
+    [{ kind: "0.3.0" }, /0\.3\.0/],
+    [{ kind: "0.2.0", tags: [] }, /0\.2\.0/],
+    [{ tags: ["adhd-kit--v0.3.0", "adhd-kit--v0.4.0"] }, /adhd-kit--v0\.4\.0/],
+    [{ developVersion: "0.5.0" }, /explicit version/],
+    [{ ahead: 1, headSubject: "fix typo" }, /fix typo/],
+  ];
+  for (const [o, msg] of cases) assert.throws(() => R.planBump(bumpState(o)), (e) => e instanceof ReleaseError && msg.test(`${e.message} ${e.next || ""}`), JSON.stringify(o));
+});
+
+test("planBump fresh run writes, commits and pushes", () => {
+  assert.deepEqual(R.planBump(bumpState()), {
+    target: "0.4.0", tag: "adhd-kit--v0.4.0", commitMessage: "adhd-kit 0.4.0",
+    write: true, commit: true, push: true, warnings: [],
+  });
+  assert.equal(R.planBump(bumpState({ summary: "caveman" })).commitMessage, "adhd-kit 0.4.0: caveman");
+});
+
+test("planBump resumes after a failed push, even without the same -m", () => {
+  const p = R.planBump(bumpState({ ahead: 1, headSubject: "adhd-kit 0.4.0: caveman", developVersion: "0.4.0" }));
+  assert.deepEqual([p.target, p.write, p.commit, p.push], ["0.4.0", false, false, true]);
+});
+
+test("planBump rerun after push keeps the same target and changes nothing", () => {
+  const p = R.planBump(bumpState({ developVersion: "0.4.0" }));
+  assert.deepEqual([p.target, p.write, p.commit, p.push], ["0.4.0", false, false, false]);
+});
+
+test("planBump dry-run without gitleaks only warns", () => {
+  const p = R.planBump(bumpState({ hasGitleaks: false, dryRun: true }));
+  assert.equal(p.warnings.length, 1);
+});
+
+test("releaseExists only treats 'release not found' as missing", () => {
+  assert.equal(R.releaseExists({ status: 0, stderr: "" }), true);
+  assert.equal(R.releaseExists({ status: 1, stderr: "release not found\n" }), false);
+  assert.throws(() => R.releaseExists({ status: 1, stderr: "HTTP 401: Bad credentials" }), CommandError);
+});
+
+test("planPublish", () => {
+  const base = { plugin: "adhd-kit", tags: ["adhd-kit--v0.3.0"], hasGitleaks: true, dryRun: false };
+  const missing = { status: 1, stderr: "release not found" };
+  assert.deepEqual(R.planPublish({ ...base, version: "0.4.0", view: missing }),
+    { action: "create", tag: "adhd-kit--v0.4.0", since: "adhd-kit--v0.3.0", warnings: [] });
+  assert.deepEqual(R.planPublish({ ...base, version: "0.3.0", view: { status: 0, stderr: "" } }),
+    { action: "skip", tag: "adhd-kit--v0.3.0" });
+  assert.deepEqual(R.planPublish({ ...base, version: "0.3.0", view: missing }),
+    { action: "create", tag: "adhd-kit--v0.3.0", since: null, warnings: [] });
+  assert.throws(() => R.planPublish({ ...base, version: "0.2.0", view: missing }), /went backwards/);
+  assert.throws(() => R.planPublish({ ...base, version: "0.4.0", view: missing, hasGitleaks: false }), ReleaseError);
+  assert.equal(R.planPublish({ ...base, version: "0.4.0", view: missing, hasGitleaks: false, dryRun: true }).warnings.length, 1);
+});

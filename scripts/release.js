@@ -181,6 +181,98 @@ function prBody(sections) {
   return sections.map((s) => `## ${s.plugin} ${s.version}\n\n${s.notes}`).join("\n\n");
 }
 
+// ---------- planning (pure) ----------
+
+const GITLEAKS_HINT = "install gitleaks: winget install gitleaks";
+
+function planBump(state) {
+  const { plugin, kind, summary, dryRun } = state;
+  const warnings = [];
+
+  // Guards (spec bump step 1).
+  if (state.branch !== "develop") {
+    throw new ReleaseError(`must be on develop (currently on ${state.branch})`, { next: "git switch develop" });
+  }
+  if (!state.clean) {
+    throw new ReleaseError("working tree is not clean", { next: "commit or stash your changes, then rerun" });
+  }
+  if (state.behind > 0) {
+    throw new ReleaseError(`develop is ${state.behind} commit(s) behind origin/develop`, { next: "git pull --ff-only origin develop" });
+  }
+  if (state.ahead > 1) {
+    throw new ReleaseError(`develop is ${state.ahead} commits ahead of origin/develop; push or drop them first`, { next: "git push origin develop" });
+  }
+  if (state.marketplaceHasVersion) {
+    throw new ReleaseError(`.claude-plugin/marketplace.json sets a version for ${plugin}; remove it (plugin.json is the only version source)`);
+  }
+  if (!state.hasGitleaks) {
+    if (!dryRun) throw new ReleaseError("gitleaks not found on PATH", { next: GITLEAKS_HINT });
+    warnings.push(`gitleaks not found on PATH; a real run will refuse (${GITLEAKS_HINT})`);
+  }
+
+  // Target (spec bump step 2).
+  const target = bumpVersion(state.mainVersion, kind);
+  const tag = tagName(plugin, target);
+  if (compareVersions(target, state.mainVersion) <= 0) {
+    throw new ReleaseError(`target ${target} is not above the released version ${state.mainVersion} on main`);
+  }
+  const last = latestTag(state.tags, plugin);
+  if (last && compareVersions(target, last.version) <= 0) {
+    throw new ReleaseError(`target ${target} is not above the latest tag ${last.tag}`);
+  }
+  if (state.tags.includes(tag)) {
+    throw new ReleaseError(`tag ${tag} already exists`);
+  }
+
+  const commitMessage = summary ? `${plugin} ${target}: ${summary}` : `${plugin} ${target}`;
+  const explicitHint = { next: `pass an explicit version above ${state.developVersion}, e.g. node scripts/release.js ${bumpVersion(state.developVersion, "patch")}` };
+
+  if (state.ahead === 1) {
+    if (!isBumpCommit(state.headSubject, plugin, target) || state.developVersion !== target) {
+      throw new ReleaseError(`develop has an unpushed commit that is not the ${plugin} ${target} bump: "${state.headSubject}"`, {
+        next: "push or drop that commit, then rerun",
+      });
+    }
+    return { target, tag, commitMessage, write: false, commit: false, push: true, warnings };
+  }
+
+  const cmp = compareVersions(state.developVersion, target);
+  if (cmp > 0) {
+    throw new ReleaseError(`develop already has ${plugin} ${state.developVersion}, above ${target}; pass an explicit version`, explicitHint);
+  }
+  if (cmp === 0) {
+    return { target, tag, commitMessage, write: false, commit: false, push: false, warnings };
+  }
+  return { target, tag, commitMessage, write: true, commit: true, push: true, warnings };
+}
+
+function releaseExists(view) {
+  if (view.status === 0) return true;
+  if (/release not found/i.test(view.stderr || "")) return false;
+  throw new CommandError(`gh release view failed: ${(view.stderr || "").trim() || `exit ${view.status}`}`);
+}
+
+function planPublish({ plugin, version, tags, view, hasGitleaks, dryRun }) {
+  const tag = tagName(plugin, version);
+  const last = latestTag(tags, plugin);
+  if (last && compareVersions(version, last.version) < 0) {
+    throw new ReleaseError(`${plugin} version went backwards: plugin.json has ${version}, latest tag is ${last.tag}`);
+  }
+  if (releaseExists(view)) return { action: "skip", tag };
+
+  const warnings = [];
+  if (!hasGitleaks) {
+    if (!dryRun) throw new ReleaseError("gitleaks not found on PATH; refusing to publish without a secret scan", { next: GITLEAKS_HINT });
+    warnings.push(`gitleaks not found on PATH; a real run will refuse (${GITLEAKS_HINT})`);
+  }
+  const below = tags.filter((t) => {
+    const l = latestTag([t], plugin);
+    return l && compareVersions(l.version, version) < 0;
+  });
+  const since = latestTag(below, plugin);
+  return { action: "create", tag, since: since ? since.tag : null, warnings };
+}
+
 // ---------- entry point ----------
 
 async function main(argv) {}
@@ -206,4 +298,7 @@ module.exports = {
   bumpedPlugins,
   prTitle,
   prBody,
+  planBump,
+  releaseExists,
+  planPublish,
 };
