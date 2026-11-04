@@ -495,8 +495,49 @@ function bump(opts) {
 
 // ---------- publish command ----------
 
-function publish() {
-  throw new ReleaseError("publish is not implemented yet");
+function publish(opts) {
+  const dryRun = opts.dryRun;
+
+  step("guards");
+  run("gh", ["auth", "status"]);
+  const sha = run("git", ["rev-parse", "HEAD"]);
+  const tags = listTags("*--v*");
+  const hasGitleaks = scan("") !== "missing";
+  const versions = readPluginVersions("HEAD");
+
+  const report = (line) => {
+    console.log(line);
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
+  };
+
+  for (const plugin of Object.keys(versions).sort()) {
+    step(`publish ${plugin}`);
+    const version = versions[plugin];
+    const tag = tagName(plugin, version);
+    const r = exec("gh", ["release", "view", tag]);
+    if (r.error) throw new CommandError(`gh could not be started: ${r.error.message}`);
+    const p = planPublish({ plugin, version, tags, view: { status: r.status, stderr: r.stderr }, hasGitleaks, dryRun });
+    if (p.action === "skip") {
+      report(`${tag}: release exists, nothing to do`);
+      continue;
+    }
+    for (const w of p.warnings) console.error(`warning: ${w}`);
+
+    const notes = notesFor(plugin, p.since, "HEAD");
+    if (scan(notes) === "hit") {
+      throw new ReleaseError(`secret scan flagged the release notes for ${tag}; nothing was created`, {
+        next: "reword or rewrite the flagged commit subject, then rerun the workflow",
+      });
+    }
+    if (dryRun) console.log(`notes for ${tag}:\n${notes}`);
+
+    const url = run(
+      "gh",
+      ["release", "create", tag, "--target", sha, "--title", `${plugin} ${version}`, "--notes-file", "-", "--latest=false"],
+      { input: notes, mutating: true, dryRun },
+    );
+    report(dryRun ? `${tag}: would be created (dry-run)` : `${tag}: created ${url}`);
+  }
 }
 
 // ---------- entry point ----------
